@@ -9,8 +9,9 @@ heavy concurrent load. A React dashboard shows everything live over Socket.IO.
 |---|---|
 | **Backend** | Node.js 20+, Express, TypeScript, MongoDB (Mongoose), Redis (ioredis), Socket.IO, Zod, JWT |
 | **Frontend** | React 18 + TypeScript (Vite), Socket.IO client, hand-rolled SVG map (no paid map APIs) |
-| **Tests** | Vitest + Supertest + socket.io-client against a real `mongod` (mongodb-memory-server) — **55 tests** |
+| **Tests** | Vitest + Supertest + socket.io-client against a real `mongod` (mongodb-memory-server) — **56 tests** |
 | **Docs** | OpenAPI 3 at `http://localhost:4000/docs` · this README · [docs/CONCURRENCY.md](docs/CONCURRENCY.md) |
+| **Workflow** | Built with AI assistance; later changes made in **CodeZero** and validated as described in [§15](#15-development-workflow-with-codezero) |
 
 ---
 
@@ -30,6 +31,7 @@ heavy concurrent load. A React dashboard shows everything live over Socket.IO.
 12. [Project structure](#12-project-structure)
 13. [Design decisions & trade-offs](#13-design-decisions--trade-offs)
 14. [Assumptions & limitations](#14-assumptions--limitations)
+15. [Development workflow with CodeZero](#15-development-workflow-with-codezero)
 
 ---
 
@@ -78,7 +80,7 @@ Demo users are seeded automatically when the database is empty (`SEED_ON_START=t
 
 | Command | What it does |
 |---|---|
-| `npm test` | Backend test suite (55 tests, ~15 s) |
+| `npm test` | Backend test suite (56 tests, ~15 s) |
 | `npm run test:coverage --prefix backend` | Tests with V8 coverage report |
 | `npm run typecheck` | `tsc --noEmit` for backend and frontend |
 | `npm run build` | Compile API to `backend/dist`, bundle dashboard to `frontend/dist` |
@@ -426,14 +428,14 @@ indexes and conditional updates behave exactly as in production. Redis uses `ior
 
 ```
  ✓ tests/lifecycle.test.ts    (21 tests)
- ✓ tests/concurrency.test.ts  (7 tests)
+ ✓ tests/concurrency.test.ts  (8 tests)
  ✓ tests/auth.test.ts         (10 tests)
  ✓ tests/realtime.test.ts     (4 tests)
  ✓ tests/idempotency.test.ts  (7 tests)
  ✓ tests/scoring.test.ts      (6 tests)
 
  Test Files  6 passed (6)
-      Tests  55 passed (55)
+      Tests  56 passed (56)
 
  Coverage (npm run test:coverage): 90.8% statements · 78.6% branches · 90.7% functions
 ```
@@ -442,7 +444,7 @@ The suite was run repeatedly to check for flakiness in the race tests (all runs 
 
 | File | Covers |
 |---|---|
-| `concurrency.test.ts` | 20-way assignment races (with and without the Redis lock), capacity races, parallel auto-dispatch, accept vs cancel, accept vs timeout, duplicate accepts |
+| `concurrency.test.ts` | 20-way assignment races (with and without the Redis lock), capacity races, parallel auto-dispatch, accept vs cancel, accept vs timeout, duplicate accepts, failed accept does not inflate agent stats |
 | `idempotency.test.ts` | key required, replay, payload mismatch (422), 10 concurrent identical calls, key release on failure, per-user scoping, retried manual assign |
 | `lifecycle.test.ts` | nearest/skill/offline filtering, workload weighting, priority radius, priority queue, pending → failed, full happy path + audit trail, reject → re-dispatch, timeout → re-dispatch, max attempts, ownership, invalid transitions, cancel (idempotent), reassign, reassign to unavailable agent, skill mismatch, edit rules, validation errors, heartbeat offline detection, presence API, dashboard counters |
 | `auth.test.ts` | login, generic credential errors, validation, missing/tampered tokens, RBAC matrix, admin config validation, user creation |
@@ -503,8 +505,13 @@ docker-compose.yml               MongoDB + Redis
 
 - **Single tenant, single city.** Synthetic data around Bengaluru; distances are straight-line (Haversine / `$geoNear`),
   not road distances or ETAs.
-- **`REDIS_URL=memory` is single-process.** Running several API instances requires real Redis. For multi-instance
-  Socket.IO broadcasting add `@socket.io/redis-adapter` (not included to keep the demo dependency-free).
+- **`REDIS_URL=memory` is single-process.** Running several API instances requires real Redis; with a real
+  `REDIS_URL`, Socket.IO uses `@socket.io/redis-adapter` so events reach sockets on every instance (verified with two
+  instances against Redis 5). The automated suite runs in memory mode, so the adapter path is covered by that manual
+  check rather than by CI.
+- **`npm audit`** reports advisories only in test tooling (vitest/tinypool/esbuild, dev-only) and in `ioredis-mock`'s
+  Lua runtime (`fengari` → `sprintf-js`, moderate), which is used only in `REDIS_URL=memory` demo mode. Fixing them
+  needs major-version upgrades of the test tooling, which was out of scope.
 - **Compensation instead of transactions** means there is a millisecond window where an assignment document exists
   before the request points to it; the unique index and conditional updates keep that window harmless, and the
   sweeper/next operation always converges.
@@ -514,3 +521,46 @@ docker-compose.yml               MongoDB + Redis
 - **JWTs are not revocable** before expiry (no refresh-token/denylist); deactivating a user blocks `/auth/me` only.
 - The dashboard map is a schematic SVG projection, not a tile map, to avoid paid or rate-limited map services.
 - Frontend has no automated tests; it was verified manually against the running API and simulator.
+
+---
+
+## 15. Development workflow with CodeZero
+
+After the first version was pushed, the repository was indexed in **CodeZero** (VS Code extension, Claude as the
+coding provider). The extension ran in **"asks first"** mode, so every file edit was shown as a diff and approved
+before it was written. Screenshots and transcripts are in [`docs/codezero/`](docs/codezero/).
+
+### 1. Understanding the codebase
+
+- **Code Graph** ([screenshot](docs/codezero/01-code-graph.png)) — used to check that the layering holds: `services`
+  is the hub that routes, jobs, realtime and scripts depend on; `models` and `infra` are leaves; the frontend is a
+  separate cluster with no code dependency on the backend (it talks only through REST and Socket.IO).
+- **Codebase walkthrough** ([screenshot](docs/codezero/02-explain.png),
+  [full answer](docs/codezero/02-explain-dispatch-flow.md)) — asked CodeZero to trace `POST /api/requests` → offer →
+  accept and explain duplicate-assignment prevention. It read the routes, services and models (8 tool calls) and its
+  explanation matched the design in [docs/CONCURRENCY.md](docs/CONCURRENCY.md). It also flagged two small gaps, one of
+  which turned out to be a real bug (below).
+
+### 2. Changes made with CodeZero
+
+| # | Change | Commit | CodeZero session |
+|---|---|---|---|
+| 1 | Count `stats.accepted` only after the request transition succeeds (bug found during the walkthrough) | `082a00c` | [prompt](docs/codezero/03-fix-session.png) · [edit approval](docs/codezero/04-edit-approval.png) · [result](docs/codezero/05-fix-result.png) |
+| 2 | Socket.IO Redis adapter for multi-instance broadcasting, with clean shutdown | `283e7d6` | [prompt](docs/codezero/06-adapter-session.png) · [edit approval](docs/codezero/07-adapter-edit-approval.png) · [result](docs/codezero/08-adapter-result.png) |
+
+### 3. How each AI-assisted change was validated
+
+Every change went through the same checklist before it was committed: read the full diff, `npm run typecheck`, the
+full test suite, and a check aimed at whatever the generated change had **not** proven on its own.
+
+| Change | What CodeZero reported | Gap found in review | How it was closed |
+|---|---|---|---|
+| Accepted-stat fix | Fix + regression test, 56/56 passing. It noted it had **not** run the new test against the old code. | A test that was never seen failing might not test anything. The test also did not check that the failed accept cleans up after itself. | Re-ran the test with the fix reverted: it **failed** (`expected 1 to be 0`), so it genuinely catches the bug. Added assertions that the assignment ends `cancelled` and the agent's capacity is released. |
+| Redis adapter | Typecheck + 56/56 passing. It noted the adapter path is **not exercised** by the tests (they run with `REDIS_URL=memory`) and that `npm install` printed 11 audit advisories. | Passing tests said nothing about the feature itself. The audit warnings needed triage before shipping. | Ran **two API instances against a real Redis 5 server**: a request created on instance B reached a dashboard socket on instance A. A control run without the adapter did **not** deliver it, which confirms the adapter is what makes it work. `npm audit` triage: all advisories are in dev-only test tooling or the memory-mode Redis mock, none of them introduced by this change (documented in §14). |
+
+The second gap CodeZero flagged — `createRequest` only logs a failed immediate dispatch — was reviewed and kept as
+intended behaviour: the request is persisted as `pending`, and the sweeper retries it within `SWEEP_INTERVAL_MS`.
+
+**Takeaway:** CodeZero was most useful for navigating the code and for small, well-scoped changes. Its own summaries
+were honest about what it had not verified, and those notes were the starting point for the review rather than the
+end of it.
