@@ -1,8 +1,11 @@
 import type { Server as HttpServer } from 'node:http';
+import { createAdapter } from '@socket.io/redis-adapter';
+import type Redis from 'ioredis';
 import { Server } from 'socket.io';
 import { z } from 'zod';
 import { env } from '../config/env';
 import { logger } from '../infra/logger';
+import { redis } from '../infra/redis';
 import { verifyToken, type AuthUser } from '../services/auth.service';
 import { heartbeat } from '../services/presence.service';
 import { ROOMS, bindIo } from './emitter';
@@ -12,6 +15,23 @@ const heartbeatPayload = z
   .optional();
 
 type Ack = (response: { ok: boolean; error?: string; serverTime?: number }) => void;
+
+let adapterClients: { pub: Redis; sub: Redis } | null = null;
+
+/**
+ * Broadcasts across API instances via Redis pub/sub. Skipped for REDIS_URL=memory:
+ * ioredis-mock pub/sub is unreliable and memory mode is single-process anyway.
+ */
+function attachRedisAdapter(io: Server): void {
+  if (env.REDIS_URL === 'memory') return;
+  const pub = redis().duplicate();
+  const sub = redis().duplicate();
+  pub.on('error', (err) => logger.error({ err }, 'Socket.IO Redis pub error'));
+  sub.on('error', (err) => logger.error({ err }, 'Socket.IO Redis sub error'));
+  io.adapter(createAdapter(pub, sub));
+  adapterClients = { pub, sub };
+  logger.info('Socket.IO Redis adapter enabled');
+}
 
 /**
  * Socket.IO server.
@@ -26,6 +46,8 @@ export function createSocketServer(httpServer: HttpServer): Server {
     pingInterval: 10_000,
     pingTimeout: 5_000,
   });
+
+  attachRedisAdapter(io);
 
   io.use((socket, next) => {
     const raw =
@@ -76,4 +98,13 @@ export function createSocketServer(httpServer: HttpServer): Server {
 
   bindIo(io);
   return io;
+}
+
+/** Closes the Socket.IO server and the Redis adapter's pub/sub clients, if any. */
+export async function closeSocketServer(io: Server): Promise<void> {
+  io.close();
+  if (!adapterClients) return;
+  const { pub, sub } = adapterClients;
+  adapterClients = null;
+  await Promise.allSettled([pub.quit(), sub.quit()]);
 }

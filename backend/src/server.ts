@@ -5,7 +5,7 @@ import { startSweeper } from './jobs/sweeper';
 import { logger } from './infra/logger';
 import { connectMongo, disconnectMongo } from './infra/mongo';
 import { connectRedis, disconnectRedis } from './infra/redis';
-import { createSocketServer } from './realtime/socket';
+import { closeSocketServer, createSocketServer } from './realtime/socket';
 import { seedIfEmpty } from './scripts/seedData';
 
 async function main() {
@@ -25,7 +25,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutting down');
     stopSweeper();
-    io.close();
+    await closeSocketServer(io);
     server.close();
     await Promise.allSettled([disconnectRedis(), disconnectMongo()]);
     process.exit(0);
