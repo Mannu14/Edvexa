@@ -510,7 +510,6 @@ export async function progressAssignment(assignmentId: Id, actor: Actor, step: P
       const filter: FilterQuery<IAssignment> = { _id: existing._id, agent: existing.agent, status: spec.from, active: true };
       if (step === 'accept') filter.expiresAt = { $gt: now };
       assignment = await Assignment.findOneAndUpdate(filter, { $set: { status: spec.to, [spec.timestamp]: now } }, { new: true });
-      if (assignment && step === 'accept') await Agent.updateOne({ _id: assignment.agent }, { $inc: { 'stats.accepted': 1 } });
     }
 
     if (!assignment) {
@@ -534,6 +533,7 @@ export async function progressAssignment(assignmentId: Id, actor: Actor, step: P
       if (step !== 'complete') await endAssignment({ _id: assignment._id }, 'cancelled', 'REQUEST_STATE_CHANGED');
       throw Errors.conflict('INVALID_STATE', 'The request is no longer in a state that allows this action');
     }
+    if (step === 'accept') await Agent.updateOne({ _id: assignment.agent }, { $inc: { 'stats.accepted': 1 } });
 
     await audit({
       action: spec.action,

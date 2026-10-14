@@ -180,4 +180,25 @@ describe('concurrent assignment attempts', () => {
     expect(responses.filter((r) => r.body.replayed === false)).toHaveLength(1);
     expect((await Agent.findById(agentId))!.stats.accepted).toBe(1);
   });
+
+  it('an accept whose request update fails does not count towards stats.accepted', async () => {
+    const { user } = await createStaff();
+    const { agentId, token } = await createAgent();
+    const req = await createPendingRequest(user._id);
+    const cfg = await getDispatchConfig();
+    const { assignment } = await offerToAgentUnlocked({ requestId: req._id, agentId, actor: SYSTEM_ACTOR, mode: 'manual', cfg });
+    const before = (await Agent.findById(agentId))!.stats.accepted;
+
+    // Bypass the service so the assignment stays 'offered' but the request's conditional update cannot match.
+    await ServiceRequest.updateOne({ _id: req._id }, { $set: { status: 'cancelled' } });
+
+    const accept = await api().post(`/api/assignments/${assignment.id}/accept`).set(auth(token));
+
+    expect(accept.status).toBe(409);
+    expect(accept.body.error.code).toBe('INVALID_STATE');
+    expect((await Agent.findById(agentId))!.stats.accepted).toBe(before);
+    // The defensive branch must also leave no orphaned assignment or leaked capacity.
+    expect((await Assignment.findById(assignment._id))!.status).toBe('cancelled');
+    expect((await Agent.findById(agentId))!.activeCount).toBe(0);
+  });
 });
