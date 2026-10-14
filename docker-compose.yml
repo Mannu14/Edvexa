@@ -1,0 +1,32 @@
+# Real MongoDB + Redis for running the API outside "memory" mode.
+#   docker compose up -d
+#   then in backend/.env:
+#     MONGO_URI=mongodb://localhost:27017/edvexa_dispatch
+#     REDIS_URL=redis://localhost:6379
+services:
+  mongo:
+    image: mongo:7.0
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping")']
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - '6379:6379'
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      retries: 5
+
+volumes:
+  mongo-data:
+  redis-data:

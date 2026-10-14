@@ -1,0 +1,17 @@
+{
+  "name": "edvexa-dispatch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-Time Dispatch and Resource Allocation Platform (API + dashboard)",
+  "scripts": {
+    "setup": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "simulate": "npm run simulate --prefix backend",
+    "test": "npm test --prefix backend",
+    "typecheck": "npm run typecheck --prefix backend && npm run typecheck --prefix frontend",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
